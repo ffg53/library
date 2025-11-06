@@ -1,70 +1,41 @@
 <?php
-class OCRSpace {
+class OCRSpaceSimple {
     private $apiKey;
-    private $endpoint = 'https://api.ocr.space/parse/image';
+    private $baseUrl = 'https://api.ocr.space/parse/imageurl';
     
     public function __construct($apiKey) {
         $this->apiKey = $apiKey;
     }
     
-    public function recognizeFromUrl($imageUrl, $options = []) {
-        $defaultOptions = [
+    public function recognizeFromUrl($imageUrl) {
+        // Кодируем URL для безопасной передачи в GET-параметре
+        $encodedUrl = urlencode($imageUrl);
+        
+        // Формируем полный URL запроса
+        $apiUrl = $this->baseUrl . '?' . http_build_query([
+            'apikey' => $this->apiKey,
             'language' => 'rus',
-            'isOverlayRequired' => 'false',
-//            'OCREngine' => '2'
-        ];
+            'url' => $imageUrl
+        ]);
         
-        $postData = array_merge($defaultOptions, $options, ['url' => $imageUrl]);
-        
-        return $this->makeRequest($postData);
+        return $this->makeGetRequest($apiUrl);
     }
     
-    public function recognizeFromFile($filePath, $options = []) {
-        if (!file_exists($filePath)) {
-            throw new Exception("File not found: " . $filePath);
-        }
+    private function makeGetRequest($url) {
+        $ch = curl_init();
         
-        $defaultOptions = [
-            'language' => 'rus',
-            'isOverlayRequired' => 'false',
-//            'OCREngine' => '2'
-        ];
-        
-        $postData = array_merge($defaultOptions, $options);
-        $postData['file'] = new CURLFile($filePath);
-        
-        return $this->makeRequest($postData);
-    }
-    
-    private function makeRequest($postData) {
-        $curl = curl_init();
-        
-        curl_setopt_array($curl, [
-            CURLOPT_URL => $this->endpoint,
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $postData,
-            CURLOPT_HTTPHEADER => [
-                'apikey: ' . $this->apiKey
-            ],
-            CURLOPT_TIMEOUT => 30, // Reduced timeout
-            CURLOPT_CONNECTTIMEOUT => 10,
- //           CURLOPT_SSL_VERIFYPEER => false, // Try disabling SSL verification temporarily
+            CURLOPT_TIMEOUT => 30,
             CURLOPT_FOLLOWLOCATION => true,
         ]);
         
-        $response = curl_exec($curl);
-        $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $error = curl_error($curl);
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
         
-        // Debug information
-        if ($error || $httpCode !== 200) {
-            echo "\nCURL Error: " . $error;
-            echo "\nHTTP Code: " . $httpCode;
-            echo "\n";
-        }
-        
-        curl_close($curl);
+        curl_close($ch);
         
         if ($httpCode === 200) {
             return json_decode($response, true);
@@ -79,32 +50,65 @@ class OCRSpace {
     }
 }
 
-// Usage with better error handling
+// Конфигурация
 $apiKey = 'K81126633088957';
-$ocr = new OCRSpace($apiKey);
+$githubBaseUrl = 'https://github.com/ffg53/library/blob/main/photos/';
+$localPhotosDir = 'photos/';
 
-// Test with a single file first
-$testFile = 'photos/IMG_20251106_122126.jpg';
+$ocr = new OCRSpaceSimple($apiKey);
 
-if (!file_exists($testFile)) {
-    die("Test file not found: $testFile\n");
-}
+// Получаем список файлов в папке
+$files = scandir($localPhotosDir);
+$imageFiles = array_filter($files, function($file) {
+    return $file !== '.' && $file !== '..' && 
+           in_array(strtolower(pathinfo($file, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png', 'gif']);
+});
 
-echo "Testing with file: $testFile\n";
-echo "File size: " . filesize($testFile) . " bytes\n";
+echo "Найдено изображений: " . count($imageFiles) . "\n\n";
 
-$result = $ocr->recognizeFromFile($testFile);
-
-if (!isset($result['error'])) {
-    if (isset($result['ParsedResults'][0]['ParsedText'])) {
-        $text = $result['ParsedResults'][0]['ParsedText'];
-        echo "OCR Result:\n" . $text . "\n";
+// Обрабатываем каждое изображение
+foreach ($imageFiles as $filename) {
+    echo "=== Обрабатывается: $filename ===\n";
+    
+    // Формируем прямую ссылку на GitHub с raw=true
+    $imageUrl = $githubBaseUrl . $filename . '?raw=true';
+    
+    // Альтернативный вариант через raw.githubusercontent.com (может работать быстрее)
+    // $imageUrl = "https://raw.githubusercontent.com/ffg53/library/main/photos/" . $filename;
+    
+    echo "URL: $imageUrl\n";
+    
+    $result = $ocr->recognizeFromUrl($imageUrl);
+    
+    if (isset($result['error'])) {
+        echo "❌ Ошибка: " . $result['message'] . " (HTTP: " . $result['httpCode'] . ")\n";
     } else {
-        echo "Unexpected response structure:\n";
-        print_r($result);
+        if (isset($result['ParsedResults'][0]['ParsedText'])) {
+            $text = trim($result['ParsedResults'][0]['ParsedText']);
+            if (!empty($text)) {
+                echo "✅ Распознанный текст:\n";
+                echo $text . "\n";
+                
+                // Сохраняем результат в файл
+                $outputFilename = 'results/' . pathinfo($filename, PATHINFO_FILENAME) . '.txt';
+                file_put_contents($outputFilename, $text);
+                echo "💾 Сохранено в: $outputFilename\n";
+            } else {
+                echo "⚠️ Текст не распознан\n";
+            }
+        } else {
+            echo "❌ Неожиданная структура ответа\n";
+            if (isset($result['ErrorMessage']) && !empty($result['ErrorMessage'])) {
+                echo "Ошибка API: " . $result['ErrorMessage'] . "\n";
+            }
+        }
     }
-} else {
-    echo "Error occurred:\n";
-    print_r($result);
+    
+    echo "\n" . str_repeat("-", 50) . "\n\n";
+    
+    // Пауза между запросами чтобы не превысить лимиты API
+    sleep(1);
 }
+
+echo "Обработка завершена!\n";
 ?>
